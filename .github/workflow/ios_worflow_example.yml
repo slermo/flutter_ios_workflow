@@ -1,0 +1,100 @@
+name: Build IPA on new Tag
+on:
+  push:
+    tags:
+      - "**"
+
+jobs:
+  build_ios:
+    runs-on: macos-latest
+
+    steps:
+      - name: Clone repo
+        uses: actions/checkout@v3
+
+        # Install flutter
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.24.3"
+          cache: true
+
+      # Download package
+      - name: Download flutter packages
+        run: flutter pub get
+
+      # Updating pod files
+      - name: Pod file update
+        run: |
+          cd ios
+          pod repo update
+          rm Podfile.lock
+          pod install
+          cd ..
+
+      # Certificate settings
+      - name: Import Apple Development Certificate
+        env:
+          IOS_KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD }}
+          IOS_CERTIFICATES_P12: ${{ secrets.IOS_CERTIFICATES_P12 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+        run: |
+          APPLE_DEVELOPMENT_CERTIFICATE=$RUNNER_TEMP/development_certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+          # import certificate from secrets
+          echo -n "$IOS_CERTIFICATES_P12" | base64 --decode --output $APPLE_DEVELOPMENT_CERTIFICATE
+
+          # create temporary keychain
+          security create-keychain -p "$IOS_KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$IOS_KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # import certificate to keychain
+          security import $APPLE_DEVELOPMENT_CERTIFICATE -P "$IOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+      # Create AppStoreConnectAPI key
+      - name: Create App Store Connect API Private Key in `pwd`/private_keys
+        env:
+          IOS_API_KEY_ID: ${{ secrets.IOS_API_KEY_ID }}
+          IOS_API_AUTHKEY_P8: ${{ secrets.IOS_API_AUTHKEY_P8 }}
+        run: |
+          mkdir `pwd`/private_keys
+          echo -n "$IOS_API_AUTHKEY_P8" | base64 --decode --output `pwd`/private_keys/AuthKey_$IOS_API_KEY_ID.p8
+
+      # Flutter build
+      - name: Flutter build ipa
+        run: |
+          flutter analyze --no-fatal-warnings --no-fatal-infos
+          flutter build ipa --release --no-codesign
+
+      # Archive of built data
+      - name: Archive by xcodebuild
+        env:
+          IOS_API_ISSUER_ID: ${{ secrets.IOS_API_ISSUER_ID }}
+          IOS_API_KEY_ID: ${{ secrets.IOS_API_KEY_ID }}
+        run: xcodebuild archive -workspace ./ios/Runner.xcworkspace -scheme Runner -configuration Release -destination generic/platform=iOS -archivePath ./build/ios/App.xcarchive -allowProvisioningUpdates -authenticationKeyIssuerID $IOS_API_ISSUER_ID -authenticationKeyID $IOS_API_KEY_ID -authenticationKeyPath `pwd`/private_keys/AuthKey_$IOS_API_KEY_ID.p8
+
+      # Export of built archives.
+      - name: Export by xcodebuild
+        env:
+          IOS_API_ISSUER_ID: ${{ secrets.IOS_API_ISSUER_ID }}
+          IOS_API_KEY_ID: ${{ secrets.IOS_API_KEY_ID }}
+        run: xcodebuild -exportArchive -archivePath ./build/ios/App.xcarchive -exportPath ./build/ios/ipa -exportOptionsPlist ./ios/ExportOptions.plist -allowProvisioningUpdates -authenticationKeyIssuerID $IOS_API_ISSUER_ID -authenticationKeyID $IOS_API_KEY_ID -authenticationKeyPath `pwd`/private_keys/AuthKey_$IOS_API_KEY_ID.p8
+
+      # IPA file detection.
+      - name: Detect path for ipa file
+        run: |
+          echo "IPA_PATH=$(find build/ios/ipa -type f -name '*.ipa')" >> $GITHUB_ENV
+
+      # Upload IPA files to AppStoreConnect.
+      - name: Upload to App Store Connect
+        env:
+          IOS_API_ISSUER_ID: ${{ secrets.IOS_API_ISSUER_ID }}
+          IOS_API_KEY_ID: ${{ secrets.IOS_API_KEY_ID }}
+        run: xcrun altool --upload-app --type ios -f $IPA_PATH --apiKey $IOS_API_KEY_ID --apiIssuer $IOS_API_ISSUER_ID
+
+      # Delete cache.
+      - name: Clean up keychain and provisioning profile
+        run: security delete-keychain $RUNNER_TEMP/app-signing.keychain-db
