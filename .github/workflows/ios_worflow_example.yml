@@ -1,8 +1,8 @@
-name: Build IPA on new Tag
+name: Build IPA on main changes
 on:
   push:
-    tags:
-      - "**"
+    branches:
+      - main
 
 jobs:
   build_ios:
@@ -16,7 +16,6 @@ jobs:
       - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.24.3"
           cache: true
 
       # Download package
@@ -28,7 +27,7 @@ jobs:
         run: |
           cd ios
           pod repo update
-          rm Podfile.lock
+          rm -f Podfile.lock
           pod install
           cd ..
 
